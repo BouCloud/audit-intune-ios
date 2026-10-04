@@ -1,0 +1,120 @@
+<svg id="dg-enrol" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 600" role="img" aria-labelledby="et-t et-d" style="width:100%;height:auto;display:block">
+  <title id="et-t">Types d'enrôlement iOS / iPadOS dans Intune</title>
+  <desc id="et-d">Cinq modes pour les appareils personnels et trois pour les appareils d'entreprise. Seul l'enrôlement utilisateur account-driven lit le fichier de découverte /.well-known/com.apple.remotemanagement sur le domaine de l'entreprise.</desc>
+  <defs>
+    <style>
+      #dg-enrol .et-bg   { fill: #ffffff; }
+      #dg-enrol .et-ink  { fill: #1f2328; }
+      #dg-enrol .et-mut  { fill: #57606a; }
+      #dg-enrol .et-acc  { fill: #0b5cad; }
+      #dg-enrol .et-pan  { fill: #fafbfc; stroke: #d0d7de; stroke-width: 1; }
+      #dg-enrol .et-box  { fill: #ffffff; stroke: #d0d7de; stroke-width: 1; }
+      #dg-enrol .et-hi   { fill: #eef5fc; stroke: #0b5cad; stroke-width: 1.6; }
+      #dg-enrol .et-tag  { fill: #f0f2f4; }
+      #dg-enrol .et-tagA { fill: #0b5cad; }
+      #dg-enrol .et-tagT { fill: #ffffff; }
+      #dg-enrol .et-ln   { stroke: #0b5cad; stroke-width: 1.4; fill: none; }
+      #dg-enrol text     { font-family: -apple-system, "Segoe UI", system-ui, Roboto, Helvetica, Arial, sans-serif; }
+      #dg-enrol .et-h2   { font-size: 13.5px; font-weight: 600; letter-spacing: .05em; }
+      #dg-enrol .et-lb   { font-size: 14px; font-weight: 600; }
+      #dg-enrol .et-sm   { font-size: 12px; }
+      #dg-enrol .et-xs   { font-size: 11px; }
+      #dg-enrol .et-mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px; }
+      @media (prefers-color-scheme: dark) {
+        #dg-enrol .et-bg   { fill: #0d1117; }
+        #dg-enrol .et-ink  { fill: #e6edf3; }
+        #dg-enrol .et-mut  { fill: #9198a1; }
+        #dg-enrol .et-acc  { fill: #58a6ff; }
+        #dg-enrol .et-pan  { fill: #11161d; stroke: #30363d; }
+        #dg-enrol .et-box  { fill: #0d1117; stroke: #30363d; }
+        #dg-enrol .et-hi   { fill: #0f2236; stroke: #58a6ff; }
+        #dg-enrol .et-tag  { fill: #21262d; }
+        #dg-enrol .et-tagA { fill: #1f6feb; }
+        #dg-enrol .et-ln   { stroke: #58a6ff; }
+      }
+    </style>
+    <marker id="et-fl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="et-acc"/>
+    </marker>
+  </defs>
+
+  <rect class="et-bg" width="960" height="600"/>
+  <text class="et-h2 et-mut" x="30" y="34">TYPES D'ENRÔLEMENT iOS / iPadOS DANS INTUNE</text>
+
+  <!-- ================= Appareils personnels ================= -->
+  <rect class="et-pan" x="30" y="50" width="570" height="420" rx="8"/>
+  <text class="et-lb et-ink" x="48" y="76">Appareils personnels (BYOD)</text>
+
+  <rect class="et-box" x="46" y="90" width="538" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="62" y="116">Protection d'applications (MAM)</text>
+  <text class="et-sm et-mut" x="62" y="136">Pas d'enrôlement de l'appareil, seules les apps sont gérées</text>
+  <rect class="et-tag" x="440" y="106" width="128" height="22" rx="11"/>
+  <text class="et-xs et-mut" x="504" y="121" text-anchor="middle">app Outlook, Teams…</text>
+
+  <rect class="et-box" x="46" y="164" width="538" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="62" y="190">Enrôlement web</text>
+  <text class="et-sm et-mut" x="62" y="210">Inscription JIT avec Authenticator, sans séparation des données</text>
+  <rect class="et-tag" x="440" y="180" width="128" height="22" rx="11"/>
+  <text class="et-xs et-mut" x="504" y="195" text-anchor="middle">Safari</text>
+
+  <rect class="et-hi" x="46" y="238" width="538" height="62" rx="6"/>
+  <text class="et-lb et-acc" x="62" y="264">Enrôlement utilisateur account-driven</text>
+  <text class="et-sm et-ink" x="62" y="284">Données pro et perso séparées, iOS 15+, Apple ID géré</text>
+  <rect class="et-tagA" x="440" y="254" width="128" height="22" rx="11"/>
+  <text class="et-xs et-tagT" x="504" y="269" text-anchor="middle">lit /.well-known</text>
+
+  <rect class="et-box" x="46" y="312" width="538" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="62" y="338">Enrôlement de l'appareil (Portail d'entreprise)</text>
+  <text class="et-sm et-mut" x="62" y="358">Gestion de tout l'appareil, sans séparation des données</text>
+  <rect class="et-tag" x="440" y="328" width="128" height="22" rx="11"/>
+  <text class="et-xs et-mut" x="504" y="343" text-anchor="middle">Portail d'entreprise</text>
+
+  <rect class="et-box" x="46" y="386" width="538" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="62" y="412">Enrôlement au choix de l'utilisateur</text>
+  <text class="et-sm et-mut" x="62" y="432">L'utilisateur choisit : gestion de l'appareil ou des apps seules</text>
+  <rect class="et-tag" x="440" y="402" width="128" height="22" rx="11"/>
+  <text class="et-xs et-mut" x="504" y="417" text-anchor="middle">Portail d'entreprise</text>
+
+  <!-- ================= Appareils d'entreprise ================= -->
+  <rect class="et-pan" x="620" y="50" width="310" height="420" rx="8"/>
+  <text class="et-lb et-ink" x="638" y="76">Appareils d'entreprise</text>
+
+  <rect class="et-box" x="636" y="90" width="278" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="652" y="116">Automated Device Enrollment</text>
+  <text class="et-sm et-mut" x="652" y="136">Apple Business Manager, supervisé</text>
+
+  <rect class="et-box" x="636" y="164" width="278" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="652" y="190">Apple Configurator, assistant</text>
+  <text class="et-sm et-mut" x="652" y="210">Mac + câble, réinitialise l'appareil</text>
+
+  <rect class="et-box" x="636" y="238" width="278" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="652" y="264">Apple Configurator, direct</text>
+  <text class="et-sm et-mut" x="652" y="284">Sans réinitialisation, sans affinité</text>
+
+  <text class="et-sm et-mut" x="652" y="336">Enrôlement directement auprès</text>
+  <text class="et-sm et-mut" x="652" y="354">d'Intune : pas de fichier de</text>
+  <text class="et-sm et-mut" x="652" y="372">découverte sur votre domaine.</text>
+
+  <!-- ================= Parcours account-driven ================= -->
+  <text class="et-h2 et-acc" x="30" y="504">SEUL L'ENRÔLEMENT ACCOUNT-DRIVEN PASSE PAR VOTRE SERVEUR</text>
+
+  <rect class="et-box" x="30" y="520" width="170" height="54" rx="6"/>
+  <text class="et-lb et-ink" x="115" y="543" text-anchor="middle">Adresse pro saisie</text>
+  <text class="et-xs et-mut" x="115" y="561" text-anchor="middle">Réglages &gt; VPN et gestion</text>
+
+  <rect class="et-box" x="230" y="520" width="150" height="54" rx="6"/>
+  <text class="et-lb et-ink" x="305" y="543" text-anchor="middle">Domaine</text>
+  <text class="et-xs et-mut" x="305" y="561" text-anchor="middle">partie après le @</text>
+
+  <rect class="et-hi" x="410" y="520" width="300" height="54" rx="6"/>
+  <text class="et-mono et-acc" x="560" y="542" text-anchor="middle">/.well-known/com.apple.remotemanagement</text>
+  <text class="et-xs et-ink" x="560" y="561" text-anchor="middle">votre serveur web · contrôle TLS iOS 27</text>
+
+  <rect class="et-box" x="740" y="520" width="190" height="54" rx="6"/>
+  <text class="et-lb et-ink" x="835" y="543" text-anchor="middle">BaseURL Intune</text>
+  <text class="et-xs et-mut" x="835" y="561" text-anchor="middle">puis enrôlement</text>
+
+  <line class="et-ln" x1="200" y1="547" x2="226" y2="547" marker-end="url(#et-fl)"/>
+  <line class="et-ln" x1="380" y1="547" x2="406" y2="547" marker-end="url(#et-fl)"/>
+  <line class="et-ln" x1="710" y1="547" x2="736" y2="547" marker-end="url(#et-fl)"/>
+</svg>

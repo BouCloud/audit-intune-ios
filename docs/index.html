@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iOS 27 et Intune BYOD : mettre son serveur TLS en conformité</title>
+<meta name="description" content="Depuis iOS 27, Apple bloque l'enrôlement MDM/BYOD vers les serveurs TLS non conformes. Exigences, versions minimales, configurations Apache, nginx et HAProxy, tests SSL Labs et script d'audit.">
+<style>
+  :root {
+    --bg: #fbfaf7; --fg: #1d1d1b; --muted: #5f5e58; --line: #e3e0d8;
+    --card: #ffffff; --code-bg: #f3f1ea; --accent: #b4441f; --ok: #2e7d4f; --ko: #b3261e; --warn: #9a6b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161614; --fg: #ecebe6; --muted: #a3a29b; --line: #2f2e2a;
+            --card: #1e1e1b; --code-bg: #24241f; --accent: #f08a5d; --ok: #6cc28f; --ko: #ff8a80; --warn: #e6b74a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 17px/1.65 Georgia, "Iowan Old Style", "Palatino Linotype", serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 48px 20px 80px; }
+  header .kicker { font: 600 13px/1 system-ui, sans-serif; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+  h1 { font-size: 2.1rem; line-height: 1.2; margin: 12px 0 14px; }
+  .lead { font-size: 1.15rem; color: var(--muted); margin: 0 0 8px; }
+  .meta { font: 14px system-ui, sans-serif; color: var(--muted); border-bottom: 1px solid var(--line); padding-bottom: 22px; margin-bottom: 28px; }
+  h2 { font-size: 1.45rem; margin: 48px 0 12px; padding-top: 8px; border-top: 1px solid var(--line); }
+  h3 { font: 700 1.05rem/1.4 system-ui, sans-serif; margin: 28px 0 8px; }
+  p, li { margin: 0 0 12px; }
+  a { color: var(--accent); }
+  code { font: 0.86em ui-monospace, "SF Mono", Menlo, Consolas, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  .code { position: relative; margin: 14px 0 20px; }
+  .code pre { margin: 0; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
+              padding: 16px 18px; overflow-x: auto; font: 13.5px/1.55 ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  .code .label { font: 600 12px system-ui, sans-serif; color: var(--muted); margin-bottom: 4px; }
+  .code button { position: absolute; top: 26px; right: 8px; font: 12px system-ui, sans-serif; cursor: pointer;
+                 background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0 22px; font: 14.5px/1.45 system-ui, sans-serif; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--muted); }
+  .tablewrap { overflow-x: auto; }
+  .ok { color: var(--ok); font-weight: 600; } .ko { color: var(--ko); font-weight: 600; } .warn { color: var(--warn); font-weight: 600; }
+  .callout { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+             border-radius: 8px; padding: 14px 18px; margin: 20px 0; }
+  .callout p:last-child { margin-bottom: 0; }
+  .tabs { display: flex; gap: 6px; margin-top: 16px; flex-wrap: wrap; }
+  .tabs button { font: 600 14px system-ui, sans-serif; padding: 7px 14px; border-radius: 6px; cursor: pointer;
+                 border: 1px solid var(--line); background: var(--card); color: var(--fg); }
+  .tabs button[aria-selected="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+  .panel[hidden] { display: none; }
+  ol.steps li { margin-bottom: 10px; }
+  figure.diagram { margin: 28px 0; }
+  figure.diagram svg { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  figure.diagram figcaption { font: 14px system-ui, sans-serif; color: var(--muted); margin-top: 8px; }
+  pre.out { font-size: 12.5px; }
+  header + h2 { border-top: 0; margin-top: 8px; }
+  footer { margin-top: 56px; font: 14px system-ui, sans-serif; color: var(--muted); border-top: 1px solid var(--line); padding-top: 18px; }
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <div class="kicker">Sécurité · TLS · Intune</div>
+  <h1>iOS 27 et Intune BYOD : mettre son serveur TLS en conformité</h1>
+  <p class="lead">Depuis iOS 27, un iPhone refuse de s'enrôler si le serveur en face n'a pas un TLS à jour. Le point le plus piégeux n'est ni TLS 1.3 ni les suites de chiffrement : c'est l'Extended Master Secret, qui dépend de la version d'OpenSSL.</p>
+  <div class="meta">Retour d'expérience · Apache, nginx, HAProxy · Octobre 2026</div>
+</header>
+
+<h2>Préambule : les types d'enrôlement iOS dans Intune</h2>
+<p>Intune propose huit façons de prendre en charge un iPhone ou un iPad. Elles se répartissent entre appareils personnels (BYOD) et appareils d'entreprise, et une seule d'entre elles passe par le site web de votre organisation : l'enrôlement utilisateur <strong>account-driven</strong>. C'est elle que concerne cet article.</p>
+
+<figure class="diagram">
+<svg id="dg-enrol" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 600" role="img" aria-labelledby="et-t et-d" style="width:100%;height:auto;display:block">
+  <title id="et-t">Types d'enrôlement iOS / iPadOS dans Intune</title>
+  <desc id="et-d">Cinq modes pour les appareils personnels et trois pour les appareils d'entreprise. Seul l'enrôlement utilisateur account-driven lit le fichier de découverte /.well-known/com.apple.remotemanagement sur le domaine de l'entreprise.</desc>
+  <defs>
+    <style>
+      #dg-enrol .et-bg   { fill: #ffffff; }
+      #dg-enrol .et-ink  { fill: #1f2328; }
+      #dg-enrol .et-mut  { fill: #57606a; }
+      #dg-enrol .et-acc  { fill: #0b5cad; }
+      #dg-enrol .et-pan  { fill: #fafbfc; stroke: #d0d7de; stroke-width: 1; }
+      #dg-enrol .et-box  { fill: #ffffff; stroke: #d0d7de; stroke-width: 1; }
+      #dg-enrol .et-hi   { fill: #eef5fc; stroke: #0b5cad; stroke-width: 1.6; }
+      #dg-enrol .et-tag  { fill: #f0f2f4; }
+      #dg-enrol .et-tagA { fill: #0b5cad; }
+      #dg-enrol .et-tagT { fill: #ffffff; }
+      #dg-enrol .et-ln   { stroke: #0b5cad; stroke-width: 1.4; fill: none; }
+      #dg-enrol text     { font-family: -apple-system, "Segoe UI", system-ui, Roboto, Helvetica, Arial, sans-serif; }
+      #dg-enrol .et-h2   { font-size: 13.5px; font-weight: 600; letter-spacing: .05em; }
+      #dg-enrol .et-lb   { font-size: 14px; font-weight: 600; }
+      #dg-enrol .et-sm   { font-size: 12px; }
+      #dg-enrol .et-xs   { font-size: 11px; }
+      #dg-enrol .et-mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px; }
+      @media (prefers-color-scheme: dark) {
+        #dg-enrol .et-bg   { fill: #0d1117; }
+        #dg-enrol .et-ink  { fill: #e6edf3; }
+        #dg-enrol .et-mut  { fill: #9198a1; }
+        #dg-enrol .et-acc  { fill: #58a6ff; }
+        #dg-enrol .et-pan  { fill: #11161d; stroke: #30363d; }
+        #dg-enrol .et-box  { fill: #0d1117; stroke: #30363d; }
+        #dg-enrol .et-hi   { fill: #0f2236; stroke: #58a6ff; }
+        #dg-enrol .et-tag  { fill: #21262d; }
+        #dg-enrol .et-tagA { fill: #1f6feb; }
+        #dg-enrol .et-ln   { stroke: #58a6ff; }
+      }
+    </style>
+    <marker id="et-fl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" class="et-acc"/>
+    </marker>
+  </defs>
+
+  <rect class="et-bg" width="960" height="600"/>
+  <text class="et-h2 et-mut" x="30" y="34">TYPES D'ENRÔLEMENT iOS / iPadOS DANS INTUNE</text>
+
+  <!-- ================= Appareils personnels ================= -->
+  <rect class="et-pan" x="30" y="50" width="570" height="420" rx="8"/>
+  <text class="et-lb et-ink" x="48" y="76">Appareils personnels (BYOD)</text>
+
+  <rect class="et-box" x="46" y="90" width="538" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="62" y="116">Protection d'applications (MAM)</text>
+  <text class="et-sm et-mut" x="62" y="136">Pas d'enrôlement de l'appareil, seules les apps sont gérées</text>
+  <rect class="et-tag" x="440" y="106" width="128" height="22" rx="11"/>
+  <text class="et-xs et-mut" x="504" y="121" text-anchor="middle">app Outlook, Teams…</text>
+
+  <rect class="et-box" x="46" y="164" width="538" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="62" y="190">Enrôlement web</text>
+  <text class="et-sm et-mut" x="62" y="210">Inscription JIT avec Authenticator, sans séparation des données</text>
+  <rect class="et-tag" x="440" y="180" width="128" height="22" rx="11"/>
+  <text class="et-xs et-mut" x="504" y="195" text-anchor="middle">Safari</text>
+
+  <rect class="et-hi" x="46" y="238" width="538" height="62" rx="6"/>
+  <text class="et-lb et-acc" x="62" y="264">Enrôlement utilisateur account-driven</text>
+  <text class="et-sm et-ink" x="62" y="284">Données pro et perso séparées, iOS 15+, Apple ID géré</text>
+  <rect class="et-tagA" x="440" y="254" width="128" height="22" rx="11"/>
+  <text class="et-xs et-tagT" x="504" y="269" text-anchor="middle">lit /.well-known</text>
+
+  <rect class="et-box" x="46" y="312" width="538" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="62" y="338">Enrôlement de l'appareil (Portail d'entreprise)</text>
+  <text class="et-sm et-mut" x="62" y="358">Gestion de tout l'appareil, sans séparation des données</text>
+  <rect class="et-tag" x="440" y="328" width="128" height="22" rx="11"/>
+  <text class="et-xs et-mut" x="504" y="343" text-anchor="middle">Portail d'entreprise</text>
+
+  <rect class="et-box" x="46" y="386" width="538" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="62" y="412">Enrôlement au choix de l'utilisateur</text>
+  <text class="et-sm et-mut" x="62" y="432">L'utilisateur choisit : gestion de l'appareil ou des apps seules</text>
+  <rect class="et-tag" x="440" y="402" width="128" height="22" rx="11"/>
+  <text class="et-xs et-mut" x="504" y="417" text-anchor="middle">Portail d'entreprise</text>
+
+  <!-- ================= Appareils d'entreprise ================= -->
+  <rect class="et-pan" x="620" y="50" width="310" height="420" rx="8"/>
+  <text class="et-lb et-ink" x="638" y="76">Appareils d'entreprise</text>
+
+  <rect class="et-box" x="636" y="90" width="278" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="652" y="116">Automated Device Enrollment</text>
+  <text class="et-sm et-mut" x="652" y="136">Apple Business Manager, supervisé</text>
+
+  <rect class="et-box" x="636" y="164" width="278" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="652" y="190">Apple Configurator, assistant</text>
+  <text class="et-sm et-mut" x="652" y="210">Mac + câble, réinitialise l'appareil</text>
+
+  <rect class="et-box" x="636" y="238" width="278" height="62" rx="6"/>
+  <text class="et-lb et-ink" x="652" y="264">Apple Configurator, direct</text>
+  <text class="et-sm et-mut" x="652" y="284">Sans réinitialisation, sans affinité</text>
+
+  <text class="et-sm et-mut" x="652" y="336">Enrôlement directement auprès</text>
+  <text class="et-sm et-mut" x="652" y="354">d'Intune : pas de fichier de</text>
+  <text class="et-sm et-mut" x="652" y="372">découverte sur votre domaine.</text>
+
+  <!-- ================= Parcours account-driven ================= -->
+  <text class="et-h2 et-acc" x="30" y="504">SEUL L'ENRÔLEMENT ACCOUNT-DRIVEN PASSE PAR VOTRE SERVEUR</text>
+
+  <rect class="et-box" x="30" y="520" width="170" height="54" rx="6"/>
+  <text class="et-lb et-ink" x="115" y="543" text-anchor="middle">Adresse pro saisie</text>
+  <text class="et-xs et-mut" x="115" y="561" text-anchor="middle">Réglages &gt; VPN et gestion</text>
+
+  <rect class="et-box" x="230" y="520" width="150" height="54" rx="6"/>
+  <text class="et-lb et-ink" x="305" y="543" text-anchor="middle">Domaine</text>
+  <text class="et-xs et-mut" x="305" y="561" text-anchor="middle">partie après le @</text>
+
+  <rect class="et-hi" x="410" y="520" width="300" height="54" rx="6"/>
+  <text class="et-mono et-acc" x="560" y="542" text-anchor="middle">/.well-known/com.apple.remotemanagement</text>
+  <text class="et-xs et-ink" x="560" y="561" text-anchor="middle">votre serveur web · contrôle TLS iOS 27</text>
+
+  <rect class="et-box" x="740" y="520" width="190" height="54" rx="6"/>
+  <text class="et-lb et-ink" x="835" y="543" text-anchor="middle">BaseURL Intune</text>
+  <text class="et-xs et-mut" x="835" y="561" text-anchor="middle">puis enrôlement</text>
+
+  <line class="et-ln" x1="200" y1="547" x2="226" y2="547" marker-end="url(#et-fl)"/>
+  <line class="et-ln" x1="380" y1="547" x2="406" y2="547" marker-end="url(#et-fl)"/>
+  <line class="et-ln" x1="710" y1="547" x2="736" y2="547" marker-end="url(#et-fl)"/>
+</svg>
+  <figcaption>Types d'enrôlement iOS / iPadOS dans Intune : seul l'enrôlement account-driven lit le fichier de découverte sur votre domaine.</figcaption>
+</figure>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Type</th><th>Appareil</th><th>Lancé depuis</th><th>Séparation des données</th><th>Lit /.well-known</th></tr></thead>
+  <tbody>
+    <tr><td>Protection d'applications (MAM, sans enrôlement)</td><td>personnel</td><td>app Outlook, Teams…</td><td>au niveau des apps</td><td>non</td></tr>
+    <tr><td>Enrôlement web (JIT, Authenticator)</td><td>personnel</td><td>Safari</td><td>non</td><td>non</td></tr>
+    <tr><td><strong>Enrôlement utilisateur account-driven</strong></td><td>personnel</td><td>Réglages &gt; VPN et gestion</td><td>oui</td><td class="ko">oui</td></tr>
+    <tr><td>Enrôlement de l'appareil (Portail d'entreprise)</td><td>personnel</td><td>Portail d'entreprise</td><td>non</td><td>non</td></tr>
+    <tr><td>Enrôlement au choix de l'utilisateur</td><td>personnel</td><td>Portail d'entreprise</td><td>selon le choix</td><td>non</td></tr>
+    <tr><td>Automated Device Enrollment (Apple Business Manager)</td><td>entreprise</td><td>assistant de configuration</td><td>non, supervisé</td><td>non</td></tr>
+    <tr><td>Apple Configurator, assistant</td><td>entreprise</td><td>Mac + câble (réinitialise)</td><td>non, supervisé</td><td>non</td></tr>
+    <tr><td>Apple Configurator, direct</td><td>entreprise</td><td>Mac + câble (sans réinitialisation)</td><td>non</td><td>non</td></tr>
+  </tbody>
+</table>
+</div>
+<p>Sources : <a href="https://www.cloudtekspace.com/post/different-types-of-ios-ipados-enrollment-in-intune">CloudTek Space, Different types of iOS/iPadOS enrollment in Intune</a> · <a href="https://learn.microsoft.com/mem/intune/enrollment/apple-account-driven-user-enrollment">Microsoft Learn, account-driven User Enrollment</a>.</p>
+
+<h2>Ce qui change avec iOS 27</h2>
+<p>À partir de la version 27 d'iOS, iPadOS, macOS, watchOS, tvOS et visionOS, Apple applique des règles TLS strictes (ATS et FCP v2.1) aux connexions système liées à la gestion des appareils : MDM, Declarative Device Management, Automated Device Enrollment, installation de profils, distribution d'apps et mises à jour logicielles.</p>
+<p>Le symptôme typique côté utilisateur, lors d'un enrôlement BYOD Intune : <em>« Your Apple Account does not support the expected services »</em>. Le message parle du compte Apple, mais la cause est côté serveur.</p>
+<p>Point important pour le diagnostic : les appareils déjà enrôlés avant la mise à jour ne sont pas touchés, même une fois passés en iOS 27. Seuls les nouveaux enrôlements, ou ceux refaits sous iOS 27, échouent. L'incident peut donc passer inaperçu plusieurs semaines.</p>
+
+<div class="callout">
+  <p><strong>Le serveur qu'on oublie :</strong> l'enrôlement BYOD « account-driven » commence par récupérer <code>https://votre-domaine/.well-known/com.apple.remotemanagement</code>. Ce fichier est souvent servi par le site web public ou un reverse proxy, pas par la plateforme MDM. C'est ce serveur-là qu'il faut auditer en premier.</p>
+</div>
+
+<figure class="diagram">
+<svg id="dg-intune" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 790" style="width:100%;height:auto;display:block" role="img" aria-labelledby="dg-t dg-d">
+  <title id="dg-t">Enrôlement BYOD Intune sous iOS 27 : contrôle TLS et remédiation</title>
+  <desc id="dg-d">L'iPhone récupère le fichier de découverte sur le serveur web du domaine, qui doit passer le contrôle TLS d'iOS 27, s'authentifie auprès de Microsoft Entra ID puis s'enrôle dans Microsoft Intune. En dessous, le parcours de remédiation selon le résultat de l'audit.</desc>
+  <defs>
+    <style>
+      #dg-intune .dg-bg   { fill: #ffffff; }
+      #dg-intune .dg-ink  { fill: #1f2328; }
+      #dg-intune .dg-mut  { fill: #57606a; }
+      #dg-intune .dg-acc  { fill: #0b5cad; }
+      #dg-intune .dg-dan  { fill: #b42318; }
+      #dg-intune .dg-box  { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1; }
+      #dg-intune .dg-ms   { fill: #f6f8fa; stroke: #8c959f; stroke-width: 1.2; }
+      #dg-intune .dg-act  { fill: #ffffff; stroke: #1f2328; stroke-width: 1.4; }
+      #dg-intune .dg-chk  { fill: #eef5fc; stroke: #0b5cad; stroke-width: 1.2; }
+      #dg-intune .dg-err  { fill: #fdf2f1; stroke: #b42318; stroke-width: 1.2; }
+      #dg-intune .dg-ln   { stroke: #57606a; stroke-width: 1.4; fill: none; }
+      #dg-intune .dg-lnA  { stroke: #0b5cad; stroke-width: 1.6; fill: none; }
+      #dg-intune .dg-lif  { stroke: #8c959f; stroke-width: 1; stroke-dasharray: 4 4; }
+      #dg-intune .dg-sep  { stroke: #d0d7de; stroke-width: 1; }
+      #dg-intune text { font-family: -apple-system, "Segoe UI", system-ui, Roboto, Helvetica, Arial, sans-serif; }
+      #dg-intune .dg-h2   { font-size: 13.5px; font-weight: 600; letter-spacing: .05em; }
+      #dg-intune .dg-lb   { font-size: 14px; font-weight: 600; }
+      #dg-intune .dg-sm   { font-size: 12px; }
+      #dg-intune .dg-xs   { font-size: 11px; }
+      #dg-intune .dg-mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 10.5px; }
+      @media (prefers-color-scheme: dark) {
+        #dg-intune .dg-bg  { fill: #0d1117; }
+        #dg-intune .dg-ink { fill: #e6edf3; }
+        #dg-intune .dg-mut { fill: #9198a1; }
+        #dg-intune .dg-acc { fill: #58a6ff; }
+        #dg-intune .dg-dan { fill: #ff7b72; }
+        #dg-intune .dg-box { fill: #161b22; stroke: #30363d; }
+        #dg-intune .dg-ms  { fill: #161b22; stroke: #6e7681; }
+        #dg-intune .dg-act { fill: #0d1117; stroke: #e6edf3; }
+        #dg-intune .dg-chk { fill: #0f2236; stroke: #58a6ff; }
+        #dg-intune .dg-err { fill: #2b1314; stroke: #ff7b72; }
+        #dg-intune .dg-ln  { stroke: #9198a1; }
+        #dg-intune .dg-lnA { stroke: #58a6ff; }
+        #dg-intune .dg-lif { stroke: #484f58; }
+        #dg-intune .dg-sep { stroke: #30363d; }
+      }
+    </style>
+    <marker id="dg-fl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="dg-mut"/>
+    </marker>
+    <marker id="dg-flA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="dg-acc"/>
+    </marker>
+  </defs>
+
+  <rect class="dg-bg" width="960" height="790"/>
+
+  <!-- ===================== 1. Séquence d'enrôlement ===================== -->
+  <text class="dg-h2 dg-mut" x="30" y="34">1 · ENRÔLEMENT BYOD INTUNE (ACCOUNT-DRIVEN)</text>
+
+  <rect class="dg-act" x="30"  y="52" width="160" height="54" rx="6"/>
+  <text class="dg-lb dg-ink" x="110" y="76" text-anchor="middle">iPhone</text>
+  <text class="dg-sm dg-mut" x="110" y="94" text-anchor="middle">iOS · iPadOS 27</text>
+
+  <rect class="dg-act" x="350" y="52" width="160" height="54" rx="6"/>
+  <text class="dg-lb dg-ink" x="430" y="76" text-anchor="middle">Serveur web</text>
+  <text class="dg-sm dg-mut" x="430" y="94" text-anchor="middle">domaine de l'entreprise</text>
+
+  <rect class="dg-ms" x="600" y="52" width="160" height="54" rx="6"/>
+  <text class="dg-lb dg-ink" x="680" y="76" text-anchor="middle">Microsoft Entra ID</text>
+  <text class="dg-sm dg-mut" x="680" y="94" text-anchor="middle">authentification</text>
+
+  <rect class="dg-ms" x="790" y="52" width="140" height="54" rx="6"/>
+  <text class="dg-lb dg-ink" x="860" y="76" text-anchor="middle">Microsoft Intune</text>
+  <text class="dg-sm dg-mut" x="860" y="94" text-anchor="middle">enrôlement MDM</text>
+
+  <line class="dg-lif" x1="110" y1="106" x2="110" y2="424"/>
+  <line class="dg-lif" x1="430" y1="106" x2="430" y2="424"/>
+  <line class="dg-lif" x1="680" y1="106" x2="680" y2="424"/>
+  <line class="dg-lif" x1="860" y1="106" x2="860" y2="424"/>
+
+  <!-- ① découverte -->
+  <text class="dg-sm dg-ink" x="120" y="146">① GET</text>
+  <text class="dg-mono dg-acc" x="166" y="146">/.well-known/com.apple.remotemanagement</text>
+  <line class="dg-lnA" x1="110" y1="158" x2="420" y2="158" marker-end="url(#dg-flA)"/>
+
+  <!-- activation serveur + contrôle TLS -->
+  <rect class="dg-box" x="424" y="152" width="12" height="92"/>
+  <line class="dg-lnA" x1="436" y1="196" x2="446" y2="196"/>
+  <rect class="dg-chk" x="446" y="132" width="216" height="148" rx="6"/>
+  <text class="dg-lb dg-acc" x="460" y="154">Contrôle TLS iOS 27</text>
+  <text class="dg-sm dg-ink" x="460" y="176">TLS ≥ 1.2 (1.3 recommandé)</text>
+  <text class="dg-sm dg-ink" x="460" y="195">Suites ECDHE + AES-GCM</text>
+  <text class="dg-sm dg-ink" x="460" y="214">Extended Master Secret</text>
+  <text class="dg-sm dg-ink" x="460" y="233">Certificat SHA-256, RSA ≥ 2048</text>
+  <line class="dg-sep" x1="460" y1="246" x2="648" y2="246"/>
+  <text class="dg-xs dg-mut" x="460" y="264">vérifié par</text>
+  <text class="dg-mono dg-acc" x="520" y="264">audit_intune_ios.sh</text>
+
+  <!-- ② réponse -->
+  <text class="dg-sm dg-ink" x="120" y="226">② JSON : version mdm-byod, BaseURL Intune</text>
+  <line class="dg-ln" x1="424" y1="238" x2="114" y2="238" marker-end="url(#dg-fl)" stroke-dasharray="6 4"/>
+
+  <!-- ③ authentification -->
+  <text class="dg-sm dg-ink" x="120" y="318">③ Authentification du compte professionnel</text>
+  <line class="dg-ln" x1="110" y1="330" x2="676" y2="330" marker-end="url(#dg-fl)"/>
+
+  <!-- ④ enrôlement -->
+  <text class="dg-sm dg-ink" x="120" y="382">④ Enrôlement, profils et apps</text>
+  <line class="dg-ln" x1="110" y1="394" x2="856" y2="394" marker-end="url(#dg-fl)"/>
+  <text class="dg-xs dg-mut" x="930" y="440" text-anchor="end">③ ④ : TLS géré par Microsoft</text>
+
+  <!-- échec -->
+  <rect class="dg-err" x="30" y="442" width="600" height="50" rx="6"/>
+  <text class="dg-lb dg-dan" x="46" y="463">Si le contrôle ① échoue</text>
+  <text class="dg-sm dg-ink" x="46" y="481">l'iPhone affiche « Your Apple Account does not support the expected services »</text>
+
+  <line class="dg-sep" x1="30" y1="520" x2="930" y2="520"/>
+
+  <!-- ===================== 2. Remédiation ===================== -->
+  <text class="dg-h2 dg-mut" x="30" y="552">2 · REMÉDIATION DU SERVEUR WEB</text>
+
+  <rect class="dg-act" x="30" y="615" width="150" height="54" rx="6"/>
+  <text class="dg-lb dg-ink" x="105" y="639" text-anchor="middle">Audit</text>
+  <text class="dg-mono dg-mut" x="105" y="657" text-anchor="middle">audit_intune_ios.sh</text>
+
+  <rect class="dg-box" x="220" y="568" width="186" height="54" rx="6"/>
+  <text class="dg-lb dg-ink" x="313" y="592" text-anchor="middle">Protocoles ou suites</text>
+  <text class="dg-sm dg-mut" x="313" y="610" text-anchor="middle">hors liste Apple</text>
+
+  <rect class="dg-box" x="220" y="668" width="186" height="54" rx="6"/>
+  <text class="dg-lb dg-dan" x="313" y="692" text-anchor="middle">EMS absent</text>
+  <text class="dg-sm dg-mut" x="313" y="710" text-anchor="middle">OpenSSL serveur &lt; 1.1.0</text>
+
+  <rect class="dg-box" x="446" y="568" width="250" height="54" rx="6"/>
+  <text class="dg-lb dg-ink" x="571" y="592" text-anchor="middle">Restreindre la configuration</text>
+  <text class="dg-sm dg-mut" x="571" y="610" text-anchor="middle">Apache · nginx · HAProxy</text>
+
+  <rect class="dg-box" x="446" y="652" width="250" height="118" rx="6"/>
+  <text class="dg-lb dg-ink" x="462" y="675">Changer la pile TLS</text>
+  <text class="dg-sm dg-ink" x="462" y="699">a. Migrer vers un OS récent</text>
+  <text class="dg-sm dg-ink" x="462" y="721">b. Proxy TLS récent en frontal</text>
+  <text class="dg-sm dg-ink" x="462" y="743">c. Recompiler le serveur web</text>
+  <text class="dg-sm dg-mut" x="478" y="759">avec OpenSSL 1.1.1 ou plus</text>
+
+  <rect class="dg-act" x="736" y="615" width="194" height="54" rx="6"/>
+  <text class="dg-lb dg-ink" x="833" y="639" text-anchor="middle">Valider</text>
+  <text class="dg-sm dg-mut" x="833" y="657" text-anchor="middle">ré-audit · nscurl · iOS 27</text>
+
+  <path class="dg-ln" d="M180,642 H200 V595 H216" marker-end="url(#dg-fl)"/>
+  <path class="dg-ln" d="M200,642 V695 H216" marker-end="url(#dg-fl)"/>
+  <line class="dg-ln" x1="406" y1="595" x2="442" y2="595" marker-end="url(#dg-fl)"/>
+  <line class="dg-ln" x1="406" y1="695" x2="442" y2="695" marker-end="url(#dg-fl)"/>
+  <path class="dg-ln" d="M696,595 H716 V642 H732" marker-end="url(#dg-fl)"/>
+  <path class="dg-ln" d="M696,711 H716 V642"/>
+</svg>
+  <figcaption>Enrôlement BYOD Intune sous iOS 27 : le contrôle TLS porte sur votre serveur web, pas sur les services Microsoft.</figcaption>
+</figure>
+
+<h2>Périmètre : le BYOD account-driven</h2>
+<p>Comme le montre le préambule, seul l'enrôlement utilisateur account-driven lit le fichier de découverte sur votre domaine. Les autres modes, personnels comme professionnels, contactent directement les services Microsoft, conformes et gérés par Microsoft. Les appareils déjà enrôlés avant iOS 27 ne sont pas touchés.</p>
+
+<h2>Le fichier de découverte, à quoi sert-il ?</h2>
+<p>En BYOD account-driven, l'iPhone ne connaît pas encore votre MDM. Il le découvre à partir du <strong>domaine de l'adresse saisie</strong> : pour <code>prenom.nom@example.com</code>, il lit <code>https://example.com/.well-known/com.apple.remotemanagement</code>. Ce petit fichier JSON lui indique quel MDM contacter et à quelle adresse. Pour Intune, il a cette forme (<a href="https://learn.microsoft.com/mem/intune/enrollment/apple-account-driven-user-enrollment">documentation Microsoft</a>) :</p>
+<div class="code"><div class="label">/.well-known/com.apple.remotemanagement</div><pre><code>{"Servers":[{"Version":"mdm-byod","BaseURL":"https://manage.microsoft.com/EnrollmentServer/PostReportDeviceInfoForUEV2?aadTenantId=&lt;ID-du-tenant-Entra&gt;"}]}</code></pre></div>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Exigence de publication</th><th>Valeur</th></tr></thead>
+  <tbody>
+    <tr><td>Emplacement</td><td>racine du domaine de connexion des utilisateurs</td></tr>
+    <tr><td>Nom</td><td><code>com.apple.remotemanagement</code>, sans extension</td></tr>
+    <tr><td>Protocole</td><td>HTTPS, conforme aux exigences TLS d'iOS 27</td></tr>
+    <tr><td>Content-Type</td><td><code>application/json</code></td></tr>
+    <tr><td>Redirection</td><td>déconseillée : répondre directement en 200</td></tr>
+    <tr><td>Champ <code>Version</code></td><td><code>mdm-byod</code></td></tr>
+    <tr><td>Champ <code>BaseURL</code></td><td>point d'enrôlement Intune avec l'ID du tenant Entra</td></tr>
+  </tbody>
+</table>
+</div>
+<p>Ce fichier est souvent servi par le site vitrine ou un reverse proxy, géré par une autre équipe ou un prestataire. Si ce serveur échoue au contrôle TLS d'iOS 27, l'iPhone s'arrête à cette première étape, avant même d'atteindre Intune.</p>
+
+<h2>Les exigences</h2>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Point</th><th>Exigé</th><th>Refusé</th></tr></thead>
+  <tbody>
+    <tr><td>Version TLS</td><td>TLS 1.2 minimum, TLS 1.3 recommandé</td><td>SSLv3, TLS 1.0, TLS 1.1</td></tr>
+    <tr><td>Suites TLS 1.2</td><td>ECDHE + AES-GCM (SHA-256/384)</td><td>DHE, CBC, RSA statique, 3DES, CAMELLIA…</td></tr>
+    <tr><td>Extended Master Secret (RFC 7627)</td><td>Obligatoire en TLS 1.2</td><td>Absent</td></tr>
+    <tr><td>Certificat</td><td>RSA ≥ 2048 ou ECDSA ≥ 256, signature SHA-256+, SAN, chaîne valide</td><td>SHA-1, clé courte, expiré</td></tr>
+    <tr><td>Signature du handshake</td><td>SHA-256 ou plus</td><td>rsa_pkcs1_sha1</td></tr>
+  </tbody>
+</table>
+</div>
+<p>Exceptions prévues par Apple : les serveurs SCEP et les serveurs de mise en cache de contenu ne sont pas concernés.</p>
+
+<h2>Le piège : l'Extended Master Secret</h2>
+<p>Restreindre les protocoles et les suites se fait en deux lignes de configuration. L'EMS, lui, ne se configure pas : il est activé automatiquement à partir d'<strong>OpenSSL 1.1.0</strong>. Si votre serveur web est lié à un OpenSSL plus ancien, aucune directive ne le fera apparaître.</p>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Distribution</th><th>OpenSSL fourni</th><th>EMS</th><th>TLS 1.3</th></tr></thead>
+  <tbody>
+    <tr><td>RHEL / CentOS 7</td><td>1.0.2k</td><td class="ko">Non</td><td class="ko">Non</td></tr>
+    <tr><td>RHEL / Rocky / Alma 8</td><td>1.1.1</td><td class="ok">Oui</td><td class="ok">Oui</td></tr>
+    <tr><td>RHEL / Rocky / Alma 9</td><td>3.0</td><td class="ok">Oui</td><td class="ok">Oui</td></tr>
+    <tr><td>Debian 10, 11</td><td>1.1.1</td><td class="ok">Oui</td><td class="ok">Oui</td></tr>
+    <tr><td>Debian 12+</td><td>3.0</td><td class="ok">Oui</td><td class="ok">Oui</td></tr>
+    <tr><td>Ubuntu 20.04</td><td>1.1.1</td><td class="ok">Oui</td><td class="ok">Oui</td></tr>
+    <tr><td>Ubuntu 22.04, 24.04</td><td>3.0</td><td class="ok">Oui</td><td class="ok">Oui</td></tr>
+  </tbody>
+</table>
+</div>
+<p>Vérifier la bibliothèque réellement utilisée par le serveur, et non celle de la commande <code>openssl</code> du système :</p>
+<div class="code"><div class="label">Shell</div><pre><code>nginx -V 2>&amp;1 | grep -i openssl                  # nginx : "built with OpenSSL ..."
+haproxy -vv | grep -i "openssl"                     # HAProxy : "Running on OpenSSL ..."
+ldd $(find / -name mod_ssl.so 2>/dev/null | head -1) | grep libssl   # Apache : libssl.so.1.1 ou .so.3 = OK</code></pre></div>
+
+<h2>Versions minimales et configuration</h2>
+<div class="tablewrap">
+<table>
+  <thead><tr><th>Logiciel</th><th>Pour TLS 1.3</th><th>Pour l'EMS</th></tr></thead>
+  <tbody>
+    <tr><td>Apache httpd</td><td>2.4.37+ avec OpenSSL 1.1.1+</td><td>Lié à OpenSSL 1.1.0+</td></tr>
+    <tr><td>nginx</td><td>1.13.0+ avec OpenSSL 1.1.1+</td><td>Lié à OpenSSL 1.1.0+</td></tr>
+    <tr><td>HAProxy</td><td>1.8+ avec OpenSSL 1.1.1+ (2.x recommandé)</td><td>Lié à OpenSSL 1.1.0+</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="tabs" role="tablist">
+  <button role="tab" aria-selected="true" data-panel="apache">Apache</button>
+  <button role="tab" aria-selected="false" data-panel="nginx">nginx</button>
+  <button role="tab" aria-selected="false" data-panel="haproxy">HAProxy</button>
+</div>
+
+<div class="panel" id="apache">
+<div class="code"><div class="label">ssl.conf ou vhost (hors &lt;VirtualHost&gt; pour s'appliquer à tous les sites)</div><pre><code>SSLProtocol          -all +TLSv1.2 +TLSv1.3
+SSLCipherSuite       ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256
+SSLHonorCipherOrder  on
+SSLCompression       off
+SSLSessionTickets    off</code></pre></div>
+<p>Sur Apache 2.4.36 ou moins, retirer <code>+TLSv1.3</code> : la directive serait refusée. Pensez aussi au bloc <code>&lt;VirtualHost _default_:443&gt;</code> de <code>ssl.conf</code>, qui garde souvent ses propres valeurs.</p>
+</div>
+
+<div class="panel" id="nginx" hidden>
+<div class="code"><div class="label">bloc http {} ou server {}</div><pre><code>ssl_protocols             TLSv1.2 TLSv1.3;
+ssl_ciphers               ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+ssl_prefer_server_ciphers on;
+ssl_session_tickets       off;</code></pre></div>
+<p><code>ssl_ciphers</code> ne concerne que TLS 1.2 : les suites TLS 1.3 par défaut d'OpenSSL sont toutes conformes.</p>
+</div>
+
+<div class="panel" id="haproxy" hidden>
+<div class="code"><div class="label">section global</div><pre><code>ssl-default-bind-options       ssl-min-ver TLSv1.2 no-tls-tickets
+ssl-default-bind-ciphers       ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256
+ssl-default-bind-ciphersuites  TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256</code></pre></div>
+<p>Un HAProxy récent placé devant un vieux serveur web est aussi la solution la plus rapide quand le système hôte ne peut pas évoluer : il termine le TLS moderne et relaie vers le backend.</p>
+</div>
+
+<h2>Et si le serveur est bloqué sur un vieil OpenSSL ?</h2>
+<p>C'était mon cas : un reverse proxy Apache 2.4.6 sous CentOS 7, lié à OpenSSL 1.0.2k. Après durcissement, tout était vert sauf l'EMS. Trois options :</p>
+<ol class="steps">
+  <li><strong>Migrer</strong> vers une distribution récente (Rocky/Alma 9, Debian 12…). La solution propre.</li>
+  <li><strong>Placer un reverse proxy récent devant</strong> (HAProxy, nginx), sur la même machine ou une autre. Le backend ne change pas.</li>
+  <li><strong>Compiler Apache</strong> récent contre OpenSSL 1.1.1 dans <code>/opt</code>, en reprenant la configuration existante. C'est la voie que j'ai choisie pour ne pas toucher à l'architecture, avec une instance de test en parallèle avant bascule et un retour arrière prêt.</li>
+</ol>
+<p>Point d'attention si vous compilez : un autre OpenSSL présent dans <code>/usr/local</code> peut être pris pour les en-têtes alors que l'édition de liens utilise celui du système. Forcez <code>CPPFLAGS</code> et <code>LDFLAGS</code> vers le même OpenSSL.</p>
+
+<h2>Tester</h2>
+
+<h3>1. En une ligne avec OpenSSL</h3>
+<div class="code"><div class="label">Depuis un poste avec OpenSSL 1.1.1 ou plus</div><pre><code>openssl s_client -connect www.example.com:443 -servername www.example.com -tls1_2 &lt;/dev/null 2&gt;/dev/null \
+  | grep -E "Cipher is|Extended master secret|Verify return code"</code></pre></div>
+<p>Attendu : une suite <code>ECDHE-…-GCM-…</code>, <code>Extended master secret: yes</code> et <code>Verify return code: 0</code>. Pensez à <code>-servername</code> : sans lui, vous testez le vhost par défaut, pas votre site.</p>
+
+<h3>2. SSL Labs</h3>
+<p><a href="https://www.ssllabs.com/ssltest/">SSL Labs</a> donne une vue d'ensemble rapide depuis l'extérieur (cochez « Do not show the results on the boards »). À vérifier :</p>
+<ul>
+  <li><strong>Protocols</strong> : TLS 1.3 et 1.2 à Yes, TLS 1.1 et 1.0 à No.</li>
+  <li><strong>Cipher Suites</strong> : en TLS 1.2, uniquement des suites ECDHE avec GCM.</li>
+  <li><strong>Certificate</strong> : chaîne complète, clé et signature conformes.</li>
+  <li><strong>Handshake Simulation</strong> : les clients Apple récents doivent passer en TLS 1.3.</li>
+</ul>
+<p>Les lignes marquées d'un astérisque concernent les clients sans SNI : elles ne reflètent pas ce que voit un iPhone. Pour l'EMS, fiez-vous à OpenSSL ou au script ci-dessous.</p>
+
+<h3>3. Le script d'audit</h3>
+<p><a href="audit_intune_ios.sh" download>audit_intune_ios.sh</a> fonctionne sur n'importe quel Linux (et macOS avec un OpenSSL Homebrew). Il est en lecture seule et peut viser un serveur distant : lancez-le depuis un serveur qui voit la cible.</p>
+<div class="code"><div class="label">Shell</div><pre><code>chmod +x audit_intune_ios.sh
+./audit_intune_ios.sh example.com                     # domaine de connexion (après le @)
+./audit_intune_ios.sh 10.0.0.12 443 example.com       # IP interne, nom public en SNI
+OPENSSL=/usr/bin/openssl11 ./audit_intune_ios.sh example.com   # client OpenSSL spécifique</code></pre></div>
+<p>Il contrôle les versions de protocole, énumère les suites TLS 1.2 acceptées, vérifie l'EMS, simule un client Apple en mode FCP v2.1, analyse le certificat, puis lit le fichier de découverte <code>/.well-known/com.apple.remotemanagement</code> : version <code>mdm-byod</code>, BaseURL Intune et, à titre informatif, TLS du service Microsoft. La section 6 du script, « Fichier de découverte Intune (BYOD account-driven) », vérifie que le fichier est présent en HTTP 200, servi en <code>application/json</code>, qu'il déclare la version <code>mdm-byod</code> (sans elle, l'enrôlement BYOD n'est pas proposé) et que sa BaseURL pointe en HTTPS vers Intune. À titre informatif, elle contrôle aussi le TLS du service Microsoft. Le script se termine par un récapitulatif exigence par exigence :</p>
+<div class="code"><div class="label">Extrait de sortie</div><pre class="out"><code>=== 7. Exigences Apple iOS 27 (support.apple.com/126655) ===
+  Statut  Exigence                                             Niveau
+  OK      TLS 1.2 accepté                                      obligatoire
+  OK      SSLv3 / TLS 1.0 / TLS 1.1 refusés                    obligatoire
+  OK      Suites ECDHE + AES-GCM (SHA-256/384) en TLS 1.2      obligatoire
+  OK      Extended Master Secret (RFC 7627) en TLS 1.2         obligatoire
+  OK      Signature du handshake SHA-256+ (pas SHA-1)          obligatoire
+  OK      Certificat signé en SHA-256+                         obligatoire
+  OK      Clé RSA &gt;= 2048 bits ou ECDSA &gt;= 256 bits            obligatoire
+  OK      Certificat en cours de validité                      obligatoire
+  OK      Extension SAN (nom du serveur)                       obligatoire
+  OK      Chaîne de confiance reconnue par l'appareil          obligatoire
+  OK      Connexion d'un client Apple FCP v2.1 simulé          synthèse
+  OK      TLS 1.3 proposé                                      recommandé
+  ALERTE  Aucune suite hors liste Apple acceptée               durcissement
+  OK      Fichier de découverte Intune valide                  BYOD Intune</code></pre></div>
+<p>Une suite acceptée hors liste Apple (DHE, CHACHA20, CBC…) apparaît en alerte et non en échec : un appareil Apple ne la propose pas, elle ne sera jamais négociée avec lui. La retirer reste du bon durcissement. Code retour 0 si conforme, 1 sinon : le script peut servir dans une supervision.</p>
+
+<h3>4. La validation Apple</h3>
+<div class="code"><div class="label">Sur un Mac</div><pre><code>nscurl --ats-diagnostics https://www.example.com/.well-known/com.apple.remotemanagement</code></pre></div>
+<p>Cherchez le test « FCP_v2.1 » : il doit afficher <span class="ok">PASS</span>. Enfin, faites un vrai enrôlement sur un appareil <strong>en iOS 27</strong>. Un iPhone en iOS 26 s'enrôlera même face à un serveur non conforme : il ne prouve rien.</p>
+
+<h2>En résumé</h2>
+<ol class="steps">
+  <li>Identifier tous les serveurs touchés par le MDM, en commençant par celui qui sert <code>/.well-known/com.apple.remotemanagement</code>.</li>
+  <li>Limiter à TLS 1.2 et 1.3, et aux suites ECDHE + AES-GCM.</li>
+  <li>Vérifier que le serveur est lié à OpenSSL 1.1.0 ou plus, sinon l'EMS manquera.</li>
+  <li>Auditer, puis valider avec <code>nscurl</code> et un enrôlement réel sous iOS 27.</li>
+</ol>
+
+<footer>
+  Script, configurations et schéma : <a href="https://github.com/BouCloud/audit-intune-ios">dépôt GitHub audit-intune-ios</a> (licence MIT).<br>
+  Référence : <a href="https://support.apple.com/en-qa/126655">Apple Support, Prepare your network environment for stricter security requirements</a>
+</footer>
+
+</main>
+<script>
+  document.querySelectorAll('.code').forEach(function (block) {
+    var btn = document.createElement('button');
+    btn.textContent = 'Copier';
+    btn.addEventListener('click', function () {
+      var txt = block.querySelector('pre').innerText;
+      (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject())
+        .then(function () { btn.textContent = 'Copié'; setTimeout(function () { btn.textContent = 'Copier'; }, 1500); })
+        .catch(function () { btn.textContent = 'Échec'; });
+    });
+    block.appendChild(btn);
+  });
+  var tabs = document.querySelectorAll('.tabs button');
+  tabs.forEach(function (t) {
+    t.addEventListener('click', function () {
+      tabs.forEach(function (o) { o.setAttribute('aria-selected', o === t); document.getElementById(o.dataset.panel).hidden = (o !== t); });
+    });
+  });
+</script>
+</body>
+</html>
