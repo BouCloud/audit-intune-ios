@@ -218,4 +218,4 @@ ldd "$(find / -name mod_ssl.so 2>/dev/null | head -1)" | grep libssl   # libssl.
 
 MIT. Voir [LICENSE](LICENSE).
 
-Auteur : Chris Bousquet, [mccool.fr](https://mccool.fr)
+Auteur : Chris Bousquet, [creaskill.mccool.fr](https://creaskill.mccool.fr/)
