@@ -6,6 +6,8 @@ Depuis iOS, iPadOS et macOS 27, Apple refuse les connexions d'enrôlement vers u
 
 > Your Apple Account does not support the expected services
 
+<p align="center"><img src="docs/erreur-enrolement-ios27.jpg" alt="Erreur iOS 27 : Sign-in Failed, Your Apple Account does not support the expected services" width="260"></p>
+
 Le message évoque le compte Apple, mais la cause est côté serveur. Les appareils déjà enrôlés avant iOS 27 ne sont pas touchés : seuls les nouveaux enrôlements, ou ceux refaits sous iOS 27, sont bloqués.
 
 ## Préambule : les types d'enrôlement iOS dans Intune
@@ -65,7 +67,7 @@ La section 6 de `audit_intune_ios.sh` contrôle chacun de ces points :
 
 | Contrôle | Résultat attendu |
 | --- | --- |
-| Présence du fichier | HTTP 200 (une redirection est signalée en alerte) |
+| Présence du fichier | HTTP 200 direct. Une redirection est signalée en alerte, puis suivie (5 sauts max) : destination finale, passage en HTTP non chiffré, conformité TLS de l'hôte cible |
 | Content-Type | `application/json` |
 | Champ `Version` | contient `mdm-byod`, sinon l'enrôlement BYOD n'est pas proposé |
 | Champ `BaseURL` | HTTPS, pointe vers `manage.microsoft.com` |
@@ -78,6 +80,38 @@ Pour vérifier rapidement à la main :
 ```bash
 curl -i https://example.com/.well-known/com.apple.remotemanagement
 ```
+
+## Ce que montrent les logs du serveur web
+
+**Avant la correction**, le journal d'accès ne contient **aucune ligne** pour les iPhone en iOS 27 : la négociation TLS échoue avant toute requête HTTP. Pour voir ces échecs, passer temporairement le journal d'erreurs Apache en `LogLevel ssl:info`.
+
+**Après la correction**, chaque tentative laisse une trace (adresse et identifiant anonymisés) :
+
+```text
+203.0.113.24 - - [04/Oct/2026:17:36:12 +0200] "GET /.well-known/com.apple.remotemanagement?user-identifier=prenom.nom@example.com&model-family=iPhone HTTP/1.1" 200 360
+```
+
+| Élément | Signification |
+| --- | --- |
+| `user-identifier` | l'adresse saisie par l'utilisateur dans Réglages |
+| `model-family` | le type d'appareil : `iPhone`, `iPad`… |
+| `200` | fichier servi : la découverte a réussi |
+| `360` | taille de la réponse en octets (le JSON Intune) |
+
+| Pour un utilisateur bloqué, le journal montre… | Où chercher |
+| --- | --- |
+| aucune ligne | TLS non conforme, ou réseau |
+| un code 404 ou 30x | fichier absent ou redirigé sur ce vhost |
+| un code 200, puis l'enrôlement échoue | après la découverte : Entra ID ou configuration Intune |
+
+```bash
+grep -h "com.apple.remotemanagement" /var/log/httpd/*access_log* | tail -20                      # dernières tentatives
+tail -f /var/log/httpd/ssl_access_log | grep --line-buffered "remotemanagement"                   # suivi en direct
+grep -h "com.apple.remotemanagement" /var/log/httpd/*access_log* | awk '{print substr($4,2,11)}' | sort | uniq -c   # par jour
+grep -ho "user-identifier=[^& ]*" /var/log/httpd/*access_log* | sort -u                          # utilisateurs distincts
+```
+
+Ces journaux contiennent des adresses professionnelles nominatives : appliquez-leur votre durée de conservation (RGPD).
 
 ## Le parcours d'enrôlement BYOD
 
@@ -110,7 +144,38 @@ sequenceDiagram
 
 Référence : [Apple Support, Prepare your network environment for stricter security requirements](https://support.apple.com/en-qa/126655).
 
-**Le piège :** l'Extended Master Secret ne se configure pas. Il est activé automatiquement à partir d'**OpenSSL 1.1.0**. Un serveur lié à OpenSSL 1.0.2 (RHEL / CentOS 7 notamment) reste non conforme quelle que soit sa configuration.
+### D'où viennent ces exigences
+
+Apple applique aux connexions de gestion des appareils deux référentiels existants :
+
+- **App Transport Security (ATS)** : la politique TLS imposée depuis des années aux applications iOS (TLS 1.2 minimum, confidentialité persistante, certificats solides).
+- **Functional Package for TLS 2.1 (FCP v2.1)** : un référentiel du NIAP, l'organisme américain de certification des produits de sécurité. Il ajoute notamment les suites AES-GCM uniquement et l'Extended Master Secret.
+
+Depuis iOS 27, les deux s'appliquent au MDM, à l'enrôlement, aux profils, aux apps et aux mises à jour.
+
+### L'Extended Master Secret, c'est quoi ?
+
+En TLS 1.2, le client et le serveur calculent un secret commun, le *master secret*, d'où sont tirées toutes les clés de la session. Dans la version d'origine du protocole, il dépend seulement du secret échangé pendant la négociation et de deux nombres aléatoires (un du client, un du serveur).
+
+En 2014, l'attaque **« Triple Handshake »** a montré qu'un serveur malveillant pouvait s'interposer et faire partager le même master secret à deux connexions distinctes : la sienne avec le client, et celle avec le vrai serveur. Combinée à la reprise de session et à la renégociation, elle permettait d'usurper l'identité d'un client, même authentifié par certificat.
+
+L'**Extended Master Secret** ([RFC 7627](https://www.rfc-editor.org/rfc/rfc7627), 2015) corrige ce défaut : le master secret est calculé à partir d'une empreinte de **tous les messages de la négociation**. Deux connexions différentes ne peuvent plus aboutir au même secret. Le client annonce l'extension `extended_master_secret` dans son premier message, et le serveur l'accepte en la renvoyant.
+
+| Version | Calcul du master secret | Accepté par iOS 27 |
+| --- | --- | --- |
+| TLS 1.2 sans EMS | secret négocié + aléas client et serveur | non |
+| TLS 1.2 avec EMS | secret négocié + empreinte de toute la négociation | oui |
+| TLS 1.3 | protection intégrée au protocole, l'extension n'existe plus | oui |
+
+L'EMS ne concerne donc que TLS 1.2, mais un iPhone peut s'y replier : le serveur doit alors l'accepter.
+
+**Le piège :** l'EMS ne se configure pas. Il est implémenté dans la bibliothèque TLS et activé automatiquement à partir d'**OpenSSL 1.1.0**. Un serveur lié à OpenSSL 1.0.2 (RHEL / CentOS 7 notamment) reste non conforme quelle que soit sa configuration : il faut changer de bibliothèque, donc de version du serveur ou de l'OS.
+
+```bash
+openssl s_client -connect example.com:443 -servername example.com -tls1_2 </dev/null 2>/dev/null | grep "Extended master secret"
+# Extended master secret: yes   -> conforme
+# Extended master secret: no    -> bloquant pour iOS 27
+```
 
 ## Utilisation
 
@@ -130,6 +195,8 @@ OPENSSL=/usr/bin/openssl11 ./audit_intune_ios.sh example.com   # client OpenSSL 
 | Dépendances | `bash`, `openssl` 1.1.1+ côté client (TLS 1.3 et EMS), `curl` en option |
 | Impact | Lecture seule, peut viser un serveur distant |
 | Code retour | `0` conforme, `1` non conforme, `2` erreur (utilisable en supervision) |
+
+**Sous Windows**, le script s'exécute dans **Git Bash** (installé avec Git pour Windows : clic droit dans le dossier > *Open Git Bash here*) ou dans **WSL** (`wsl --install -d Ubuntu`). Il ne fonctionne pas directement dans PowerShell. Si l'erreur `$'\r': command not found` apparaît, les fins de ligne ont été converties : `sed -i 's/\r$//' audit_intune_ios.sh`.
 
 ## Ce que contrôle le script
 
@@ -165,9 +232,41 @@ Extrait du récapitulatif :
   INFO    /.well-known/com.apple.remotemanagement              présent
 ```
 
+### Exemple : avant et après
+
+**Avant** : serveur encore lié à un OpenSSL ancien (domaine et certificat masqués). TLS 1.3 absent, **Extended Master Secret absent**, la simulation du client Apple échoue : 2 échecs, non conforme.
+
+![audit_intune_ios.sh sur un serveur non conforme](docs/audit-echec-ems.png)
+
+**Après** : exemple réel sur microsoft.com (Microsoft utilise lui-même l'enrôlement account-driven) : conforme, avec une seule alerte pour la redirection vers `www.microsoft.com`.
+
+![audit_intune_ios.sh sur microsoft.com](docs/audit-microsoft-com.png)
+
 Une suite acceptée hors liste Apple (DHE, CHACHA20, CBC…) est une alerte, pas un échec : l'iPhone ne la propose pas, elle n'est donc jamais négociée avec lui. La retirer reste du bon durcissement.
 
 ## Remédiation
+
+### Configuration express
+
+1. **Serveur web à jour** : lié à OpenSSL 1.1.1 ou plus (EMS + TLS 1.3). Apache 2.4.37+, nginx 1.13+, HAProxy 2.x ; d'origine sur RHEL / Rocky / Alma 8+, Debian 10+, Ubuntu 20.04+.
+2. **Protocoles et suites forcés** :
+
+```apache
+# Apache : ssl.conf, hors <VirtualHost> et dans <VirtualHost _default_:443>
+SSLProtocol          -all +TLSv1.2 +TLSv1.3
+SSLCipherSuite       ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256
+SSLHonorCipherOrder  on
+```
+
+```nginx
+ssl_protocols             TLSv1.2 TLSv1.3;
+ssl_ciphers               ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+ssl_prefer_server_ciphers on;
+```
+
+3. **Recharger** le service, puis relancer l'audit.
+
+### Démarche complète
 
 ```mermaid
 flowchart LR
@@ -211,6 +310,10 @@ ldd "$(find / -name mod_ssl.so 2>/dev/null | head -1)" | grep libssl   # libssl.
 └── docs/
     ├── index.html                  page de documentation (GitHub Pages / blog)
     ├── diagramme-intune-ios27.svg  schéma enrôlement et remédiation
+    ├── diagramme-types-enrolement.svg  types d'enrôlement Intune
+    ├── erreur-enrolement-ios27.jpg     capture de l'erreur iOS 27
+    ├── audit-microsoft-com.png         exemple d'audit conforme (microsoft.com)
+    ├── audit-echec-ems.png             exemple d'audit non conforme (EMS absent)
     └── audit_intune_ios.sh         copie du script, téléchargeable depuis la page
 ```
 

@@ -23,7 +23,7 @@
 # Code retour : 0 conforme, 1 non conforme, 2 erreur de connexion / usage
 # =============================================================================
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 HOST="${1:-}"; PORT="${2:-443}"; SNI="${3:-$HOST}"
 OPENSSL="${OPENSSL:-openssl}"; WELLKNOWN="${WELLKNOWN:-1}"; TMO=6
 [ -z "$HOST" ] && { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -165,43 +165,89 @@ if [ "$WELLKNOWN" = 1 ] && command -v curl >/dev/null 2>&1; then
   titre "6. Fichier de découverte Intune (BYOD account-driven)"
   # --resolve n'accepte qu'une IP : utilisé seulement si la cible est une adresse
   # (cible IP = serveur visé directement : pas de proxy HTTP)
-  case "$HOST" in *[!0-9.:]*) RESOLVE="" ;; *) RESOLVE="--resolve $SNI:$PORT:$HOST --noproxy $SNI" ;; esac
-  URL="https://$SNI:$PORT/.well-known/com.apple.remotemanagement"
+  case "$HOST" in *[!0-9.:]*) RESOLVE="" ;; *) RESOLVE="--resolve $SNI:$PORT:$HOST --noproxy *" ;; esac
+  # Port 443 omis de l'URL, comme le fait l'iPhone (certains sites redirigent sinon)
+  if [ "$PORT" = 443 ]; then URL="https://$SNI/.well-known/com.apple.remotemanagement"
+  else URL="https://$SNI:$PORT/.well-known/com.apple.remotemanagement"; fi
   info "Rôle : en BYOD (account-driven User Enrollment), l'iPhone lit ce fichier sur le domaine"
   info "       de l'adresse saisie par l'utilisateur pour savoir quel MDM contacter (ici Intune)."
   info "URL testée : $URL"
-  BODY=$(curl -sk --max-time "$TMO" $RESOLVE -w '\n__HTTP__%{http_code} %{content_type}' "$URL" 2>/dev/null)
-  META=$(printf '%s' "$BODY" | sed -n 's/^__HTTP__//p'); BODY=$(printf '%s' "$BODY" | sed '/^__HTTP__/d')
-  CODE=${META%% *}; CTYPE=${META#* }
+
+  # Contrôle TLS rapide d'un hôte tiers : TLS 1.2 limité aux suites Apple + EMS
+  fcp_ok() { echo | $TO "$OPENSSL" s_client -connect "$1:${2:-443}" -servername "$1" -tls1_2 -cipher "$APPLE_SUITES" 2>&1 \
+             | grep -q 'Extended master secret: yes'; }
+
+  # 1er appel sans suivre les redirections, pour voir la réponse directe du serveur audité
+  FIRST=$(curl -sk --max-time "$TMO" $RESOLVE -o /dev/null -w '%{http_code} %{redirect_url}' "$URL" 2>/dev/null)
+  CODE=${FIRST%% *}; LOC=${FIRST#* }; [ "$LOC" = "$CODE" ] && LOC=""
+
   case "$CODE" in
-    200) R_WK="présent"
-         ok "Fichier présent (HTTP 200) : ce serveur est sur le chemin d'enrôlement iOS 27"
+    30*)
+      warn "Redirection (HTTP $CODE) vers : ${LOC:-?}"
+      info "Microsoft déconseille la redirection : servir le fichier directement en 200 sur ce domaine."
+      # Suivi de la chaîne de redirections (5 au maximum)
+      BODY=$(curl -skL --max-redirs 5 --max-time "$TMO" $RESOLVE \
+             -w '\n__HTTP__%{http_code}|%{content_type}|%{url_effective}|%{num_redirects}' "$URL" 2>/dev/null)
+      META=$(printf '%s' "$BODY" | sed -n 's/^__HTTP__//p'); BODY=$(printf '%s' "$BODY" | sed '/^__HTTP__/d')
+      CODE=$(echo "$META" | cut -d'|' -f1); CTYPE=$(echo "$META" | cut -d'|' -f2)
+      FINAL=$(echo "$META" | cut -d'|' -f3); NB=$(echo "$META" | cut -d'|' -f4)
+      info "Destination finale ($NB redirection(s)) : $FINAL -> HTTP $CODE"
+      case "$FINAL" in
+        https://*) ;;
+        *) ko "La redirection aboutit en HTTP non chiffré : refusé par iOS"; R_JSON="KO"; CODE="http" ;;
+      esac
+      # Chaque hôte de la chaîne doit être conforme : contrôle de l'hôte final s'il diffère
+      FHOST=$(echo "$FINAL" | sed 's#^https\{0,1\}://\([^/:?]*\).*#\1#')
+      FPORT=$(echo "$FINAL" | sed -n 's#^https://[^/:?]*:\([0-9]*\).*#\1#p'); FPORT=${FPORT:-443}
+      if [ "$CODE" != "http" ] && [ -n "$FHOST" ] && { [ "$FHOST" != "$SNI" ] || [ "$FPORT" != "$PORT" ]; } && moderne; then
+        if fcp_ok "$FHOST" "$FPORT"; then ok "Hôte cible $FHOST:$FPORT : TLS 1.2 FCP + EMS conforme"
+        else ko "Hôte cible $FHOST:$FPORT : TLS non conforme (ou injoignable) : à auditer avec ce script"; fi
+      fi
+      R_WK="redirigé ($CODE)" ;;
+    200)
+      BODY=$(curl -sk --max-time "$TMO" $RESOLVE -w '\n__HTTP__%{http_code}|%{content_type}' "$URL" 2>/dev/null)
+      META=$(printf '%s' "$BODY" | sed -n 's/^__HTTP__//p'); BODY=$(printf '%s' "$BODY" | sed '/^__HTTP__/d')
+      CTYPE=$(echo "$META" | cut -d'|' -f2)
+      R_WK="présent" ;;
+  esac
+
+  case "$CODE" in
+    200) ok "Fichier servi (HTTP 200) : ce serveur est sur le chemin d'enrôlement iOS 27"
          case "$CTYPE" in *json*) ok "Content-Type : $CTYPE" ;; *) warn "Content-Type '$CTYPE' (attendu : application/json)" ;; esac
          VERS=$(printf '%s' "$BODY" | grep -o '"Version"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/' | tr '\n' ' ' | sed 's/ *$//')
          BASE=$(printf '%s' "$BODY" | grep -o '"BaseURL"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\(https\{0,1\}:[^"]*\)"$/\1/')
          if [ -n "$VERS" ] && [ -n "$BASE" ]; then
-           R_JSON="OK"
+           [ "$R_JSON" = "KO" ] || R_JSON="OK"
            ok "Version(s) déclarée(s) : $VERS"
            echo "$VERS" | grep -q 'mdm-byod' || warn "Pas de version 'mdm-byod' : l'enrôlement BYOD account-driven ne sera pas proposé"
            info "BaseURL : $BASE"
+           # Intune : manage.microsoft.com (commercial), manage-beta (anneau pré-production),
+           # manage.microsoft.us (US Government), manage.microsoftonline.cn (Chine)
+           BH=$(echo "$BASE" | sed 's#^https\{0,1\}://\([^/:?]*\).*#\1#')
            case "$BASE" in
-             https://*manage.microsoft.com*) ok "BaseURL pointe vers Microsoft Intune" ;;
-             https://*) info "BaseURL hors Intune (autre MDM ?)" ;;
+             https://manage-beta.microsoft.com/*)
+               ok "BaseURL pointe vers Intune, anneau pré-production ($BH)" ;;
+             https://manage.microsoft.com/*|https://manage.microsoft.us/*|https://manage.microsoftonline.cn/*)
+               ok "BaseURL pointe vers Microsoft Intune ($BH)" ;;
+             https://*) info "BaseURL hors Intune ($BH) : autre MDM ?" ;;
              *) ko "BaseURL non HTTPS"; R_JSON="KO" ;;
            esac
+           TID=$(echo "$BASE" | grep -o 'aadTenantId=[0-9a-fA-F-]*' | cut -d= -f2)
+           [ -n "$TID" ] && info "ID du tenant Entra : $TID"
            # Côté Microsoft : contrôle informatif, non actionnable par l'organisation
-           BHOST=$(echo "$BASE" | sed 's#^https://\([^/:?]*\).*#\1#')
-           if [ -n "$BHOST" ] && moderne; then
-             MS=$(echo | $TO "$OPENSSL" s_client -connect "$BHOST:443" -servername "$BHOST" -tls1_2 -cipher "$APPLE_SUITES" 2>&1)
-             if echo "$MS" | grep -q 'Extended master secret: yes'; then info "Service $BHOST : TLS 1.2 FCP + EMS OK (côté Microsoft)"
-             else info "Service $BHOST : non vérifié depuis ce poste (proxy, filtrage ?)"; fi
+           if [ -n "$BH" ] && moderne; then
+             if fcp_ok "$BH"; then info "Service $BH : TLS 1.2 FCP + EMS OK (côté Microsoft)"
+             else info "Service $BH : non vérifié depuis ce poste (proxy, filtrage ?)"; fi
            fi
          else
            R_JSON="KO"; ko "Contenu JSON non reconnu (attendu : Servers[].Version et BaseURL)"
          fi ;;
-    30*) R_WK="redirigé"; warn "Fichier redirigé (HTTP $CODE) : la cible doit aussi être conforme, préférer une réponse directe" ;;
-    000) R_WK="injoignable"; info "Endpoint injoignable" ;;
-    *)   R_WK="absent"; info "Fichier absent (HTTP $CODE) : serveur non utilisé pour l'enrôlement BYOD" ;;
+    000) if [ -n "$R_WK" ]; then ko "Cible de la redirection injoignable"; R_JSON="KO"
+         else R_WK="injoignable"; info "Endpoint injoignable"; fi ;;
+    http) ;;
+    30*) ko "Chaîne de redirections trop longue ou en boucle"; R_JSON="KO" ;;
+    *)   [ -z "$R_WK" ] && R_WK="absent"
+         info "Fichier absent (HTTP $CODE) : serveur non utilisé pour l'enrôlement BYOD" ;;
   esac
 fi
 
